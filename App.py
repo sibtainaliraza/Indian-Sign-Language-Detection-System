@@ -85,26 +85,36 @@ class ISLProcessor(VideoProcessorBase):
         return frame.from_ndarray(img, format="bgr24")
 
 # --- 3. UI LAYOUT ---
-st.title("🇮🇳 Indian Sign Language Translator")
+st.title(" Indian Sign Language Translator")
 
+# Define the columns
 col1, col2 = st.columns([2, 1])
 
 with col2:
-    st.subheader("Instructions")
-    st.info("Hold your hand steady for 1 second to register a sign.")
+    st.subheader("Controls & Output")
     
-    # Sign Reference
+    # 1. THE CLEAR BUTTON
+    if st.button("Clear Translation History"):
+        # Resetting the sentence inside the processor is tricky, 
+        # so we often just rerun the app to clear state
+        st.session_state.translated_sentence = ""
+        st.rerun()
+
+    # 2. THE HISTORY BOX
+    # We display the current accumulated text here
+    st.info(f"**Current Translation:** {st.session_state.translated_sentence or 'Waiting for signs...'}")
+    
+    # Reference image
     image_name = "sign_alphabet_and_numbers.png"
     if os.path.exists(image_name):
         st.image(image_name, caption="ISL Reference Guide", use_container_width=True)
 
 with col1:
-    # This replaces the while loop and cv2.VideoCapture
+    # 3. THE STOP BUTTON (Built into WebRTC)
+    # The 'SELECT DEVICE' and 'STOP' buttons are automatically 
+    # included in the webrtc_streamer component.
     webrtc_streamer(
-        key="isl-translator",
+        key="isl-translator", 
         video_processor_factory=ISLProcessor,
-        rtc_configuration=RTCConfiguration(
-            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-        ),
-        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     )
