@@ -1,1 +1,8 @@
 __pycache__/
+.vscode/
+.streamlit/
+*.pyc
+*.pyo
+*.pyd
+.env
+.DS_Store
