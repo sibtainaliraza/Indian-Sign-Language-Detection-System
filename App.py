@@ -5,6 +5,7 @@ import numpy as np
 import time
 import os
 from tensorflow.keras.models import load_model
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
 # --- 1. INITIALIZATION ---
 st.set_page_config(page_title="ISL Translator", layout="wide")
@@ -21,23 +22,7 @@ def load_resources():
 
 model, labels = load_resources()
 
-# Session state for tracking the sentence and stabilization
-if 'translated_sentence' not in st.session_state:
-    st.session_state.translated_sentence = ""
-if 'last_hand_time' not in st.session_state:
-    st.session_state.last_hand_time = time.time()
-if 'run_camera' not in st.session_state:
-    st.session_state.run_camera = False
-
-# --- NEW: History Tracking Variables ---
-if 'current_prediction' not in st.session_state:
-    st.session_state.current_prediction = ""
-if 'stable_frames' not in st.session_state:
-    st.session_state.stable_frames = 0
-if 'last_appended_sign' not in st.session_state:
-    st.session_state.last_appended_sign = ""
-
-# MediaPipe Setup
+# MediaPipe Setup (Global)
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
     static_image_mode=False, 
@@ -47,113 +32,79 @@ hands = mp_hands.Hands(
 )
 mp_draw = mp.solutions.drawing_utils
 
-# --- 2. UI LAYOUT ---
-st.title(" Indian Sign Language Translator")
+# --- 2. WEB-READY PROCESSING CLASS ---
+class ISLProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.current_prediction = ""
+        self.stable_frames = 0
+        self.last_appended_sign = ""
+        self.sentence = ""
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+        rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb_frame)
+        
+        data_aux = []
+        
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # Wrist Normalization (from your provided code)
+                base_x, base_y, base_z = hand_landmarks.landmark[0].x, hand_landmarks.landmark[0].y, hand_landmarks.landmark[0].z
+                for lm in hand_landmarks.landmark:
+                    data_aux.extend([lm.x - base_x, lm.y - base_y, lm.z - base_z])
+                mp_draw.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            
+            # Pad or Trim to 126 (from your provided code)
+            if len(data_aux) == 63: data_aux.extend(list(np.zeros(63)))
+            elif len(data_aux) > 126: data_aux = data_aux[:126]
+            
+            if len(data_aux) == 126 and model is not None:
+                data_input = np.asarray(data_aux, dtype=np.float32).reshape(1, -1)
+                prediction = model.predict(data_input, verbose=0)
+                predicted_label = labels[np.argmax(prediction)]
+                
+                # History & Stability Logic
+                if predicted_label == self.current_prediction:
+                    self.stable_frames += 1
+                else:
+                    self.current_prediction = predicted_label
+                    self.stable_frames = 0
+                
+                if self.stable_frames == 15:
+                    if predicted_label != self.last_appended_sign:
+                        self.sentence += predicted_label
+                        self.last_appended_sign = predicted_label
+                
+                cv2.putText(img, f"Predicted: {predicted_label}", (20, 50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+                cv2.putText(img, f"Text: {self.sentence}", (20, 100), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        
+        return frame.from_ndarray(img, format="bgr24")
+
+# --- 3. UI LAYOUT ---
+st.title("🇮🇳 Indian Sign Language Translator")
 
 col1, col2 = st.columns([2, 1])
 
 with col2:
-    st.subheader("Controls")
-    if st.button("Start Camera"):
-        st.session_state.run_camera = True
-    if st.button("Stop Camera"):
-        st.session_state.run_camera = False
-        st.rerun()
-    if st.button("Clear Text"):
-        st.session_state.translated_sentence = ""
-        st.session_state.last_appended_sign = ""
-        st.rerun()
+    st.subheader("Instructions")
+    st.info("Hold your hand steady for 1 second to register a sign.")
     
-    st.write("### Translation History:")
-    text_area = st.empty()
-    text_area.info(st.session_state.translated_sentence or "Waiting for signs...")
-    
-    # --- REFERENCE IMAGE ---
-    st.write("### Sign Reference:")
-    image_name = "sign_alphabet_and_numbers.png" 
-    
+    # Sign Reference
+    image_name = "sign_alphabet_and_numbers.png"
     if os.path.exists(image_name):
-        st.image(image_name, use_container_width=True)
-    else:
-        st.warning(f" Image not found. Looking for: '{image_name}'")
+        st.image(image_name, caption="ISL Reference Guide", use_container_width=True)
 
 with col1:
-    image_placeholder = st.empty()
-
-# --- 3. CAMERA & INFERENCE LOOP ---
-if st.session_state.run_camera:
-    if model is None:
-        st.error(" Cannot start camera: The model failed to load.")
-    else:
-        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        
-        if not cap.isOpened():
-            st.error(" Could not open webcam.")
-        else:
-            while st.session_state.run_camera:
-                ret, frame = cap.read()
-                if not ret: break
-                
-                frame = cv2.flip(frame, 1)
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = hands.process(rgb_frame)
-                
-                data_aux = []
-                
-                if results.multi_hand_landmarks:
-                    st.session_state.last_hand_time = time.time()
-                    
-                    # --- RELATIVE TO WRIST NORMALIZATION ---
-                    for hand_landmarks in results.multi_hand_landmarks:
-                        base_x = hand_landmarks.landmark[0].x
-                        base_y = hand_landmarks.landmark[0].y
-                        base_z = hand_landmarks.landmark[0].z
-                        
-                        for lm in hand_landmarks.landmark:
-                            data_aux.extend([lm.x - base_x, lm.y - base_y, lm.z - base_z])
-                        
-                        mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                    
-                    # Pad or Trim to 126
-                    if len(data_aux) == 63:
-                        data_aux.extend(list(np.zeros(63)))
-                    elif len(data_aux) > 126:
-                        data_aux = data_aux[:126]
-                    
-                    # Prediction
-                    if len(data_aux) == 126:
-                        data_input = np.asarray(data_aux, dtype=np.float32).reshape(1, -1)
-                        prediction = model.predict(data_input, verbose=0)
-                        
-                        predicted_label = labels[np.argmax(prediction)]
-                        
-                        # --- NEW: HISTORY BUILDER LOGIC ---
-                        # 1. Check if the sign is stable
-                        if predicted_label == st.session_state.current_prediction:
-                            st.session_state.stable_frames += 1
-                        else:
-                            st.session_state.current_prediction = predicted_label
-                            st.session_state.stable_frames = 0
-                            
-                        # 2. If held steady for ~15 frames, add it to history!
-                        if st.session_state.stable_frames == 15:
-                            # Prevent adding the exact same letter twice in a row accidentally
-                            if predicted_label != st.session_state.last_appended_sign:
-                                st.session_state.translated_sentence += predicted_label
-                                st.session_state.last_appended_sign = predicted_label
-                                text_area.info(st.session_state.translated_sentence)
-                        
-                        # Show current live prediction on the video feed
-                        cv2.putText(frame, f"Live: {predicted_label}", (20, 50), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-                else:
-                    # 3-Second Space Rule: If no hands are seen for 3 seconds, add a space
-                    if time.time() - st.session_state.last_hand_time > 3.0:
-                        if st.session_state.translated_sentence and not st.session_state.translated_sentence.endswith(" "):
-                            st.session_state.translated_sentence += " "
-                            st.session_state.last_appended_sign = " " # Reset so you can type the same letter again for the next word
-                            text_area.info(st.session_state.translated_sentence)
-
-                image_placeholder.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            
-            cap.release()
+    # This replaces the while loop and cv2.VideoCapture
+    webrtc_streamer(
+        key="isl-translator",
+        video_processor_factory=ISLProcessor,
+        rtc_configuration=RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        ),
+        media_stream_constraints={"video": True, "audio": False},
+    )
