@@ -2,37 +2,39 @@ import streamlit as st
 import cv2
 import mediapipe as mp
 import numpy as np
-import time
 import os
 from tensorflow.keras.models import load_model
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
-# --- 1. INITIALIZATION ---
+# --- 1. MEMORY-SAFE RESOURCE LOADING ---
 st.set_page_config(page_title="ISL Translator", layout="wide")
 
 @st.cache_resource
-def load_resources():
+def load_all_resources():
     try:
+        # Load Model and Labels
         model = load_model('mlp.h5', compile=False)
         labels = np.load('label_classes.npy')
-        return model, labels
+        
+        # Initialize MediaPipe once and cache it to save RAM
+        mp_hands = mp.solutions.hands
+        hands = mp_hands.Hands(
+            static_image_mode=False, 
+            max_num_hands=2, 
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.5
+        )
+        mp_draw = mp.solutions.drawing_utils
+        
+        return model, labels, hands, mp_draw, mp_hands
     except Exception as e:
-        st.error(f"Error loading model: {e}")
-        return None, None
+        st.error(f"Error loading resources: {e}")
+        return None, None, None, None, None
 
-model, labels = load_resources()
+# Unpack cached resources
+model, labels, hands, mp_draw, mp_hands = load_all_resources()
 
-# MediaPipe Setup (Global)
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=False, 
-    max_num_hands=2, 
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5
-)
-mp_draw = mp.solutions.drawing_utils
-
-# --- 2. WEB-READY PROCESSING CLASS ---
+# --- 2. VIDEO PROCESSING CLASS ---
 class ISLProcessor(VideoProcessorBase):
     def __init__(self):
         self.current_prediction = ""
@@ -44,19 +46,19 @@ class ISLProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
         rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Use the global cached hands object
         results = hands.process(rgb_frame)
         
         data_aux = []
-        
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                # Wrist Normalization (from your provided code)
                 base_x, base_y, base_z = hand_landmarks.landmark[0].x, hand_landmarks.landmark[0].y, hand_landmarks.landmark[0].z
                 for lm in hand_landmarks.landmark:
                     data_aux.extend([lm.x - base_x, lm.y - base_y, lm.z - base_z])
                 mp_draw.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
             
-            # Pad or Trim to 126 (from your provided code)
+            # Pad or Trim to 126
             if len(data_aux) == 63: data_aux.extend(list(np.zeros(63)))
             elif len(data_aux) > 126: data_aux = data_aux[:126]
             
@@ -65,7 +67,7 @@ class ISLProcessor(VideoProcessorBase):
                 prediction = model.predict(data_input, verbose=0)
                 predicted_label = labels[np.argmax(prediction)]
                 
-                # History & Stability Logic
+                # Stability Logic
                 if predicted_label == self.current_prediction:
                     self.stable_frames += 1
                 else:
@@ -99,7 +101,6 @@ with col2:
         st.image(image_name, caption="ISL Reference Guide", use_container_width=True)
 
 with col1:
-    # This replaces the while loop and cv2.VideoCapture
     webrtc_streamer(
         key="isl-translator",
         video_processor_factory=ISLProcessor,
@@ -107,4 +108,5 @@ with col1:
             {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
         ),
         media_stream_constraints={"video": True, "audio": False},
+        async_processing=True # Improves performance and stability
     )
