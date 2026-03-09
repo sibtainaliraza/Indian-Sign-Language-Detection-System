@@ -6,9 +6,10 @@ import os
 from tensorflow.keras.models import load_model
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
-# --- 1. INITIALIZATION (Must be at the top to prevent AttributeErrors) ---
+# --- 1. ROBUST INITIALIZATION ---
+# This must be the very first thing after imports to stabilize threads
 if 'translated_sentence' not in st.session_state:
-    st.session_state.translated_sentence = ""
+    st.session_state['translated_sentence'] = ""
 
 # --- 2. RESOURCE LOADING ---
 st.set_page_config(page_title="ISL Translator", layout="wide")
@@ -26,15 +27,20 @@ def load_resources():
 
 model, labels = load_resources()
 
-# MediaPipe Setup
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=False, 
-    max_num_hands=2, 
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5
-)
-mp_draw = mp.solutions.drawing_utils
+# MediaPipe Setup (Moved inside a cached function for stability)
+@st.cache_resource
+def get_mediapipe_tools():
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=False, 
+        max_num_hands=2, 
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.5
+    )
+    mp_draw = mp.solutions.drawing_utils
+    return hands, mp_draw, mp_hands
+
+hands, mp_draw, mp_hands = get_mediapipe_tools()
 
 # --- 3. VIDEO PROCESSING CLASS ---
 class ISLProcessor(VideoProcessorBase):
@@ -53,7 +59,7 @@ class ISLProcessor(VideoProcessorBase):
         
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                # Wrist-normalization logic (0,0,0)
+                # Wrist-normalization logic (0,0,0) from your Indian Sign Language project
                 base_x, base_y, base_z = hand_landmarks.landmark[0].x, hand_landmarks.landmark[0].y, hand_landmarks.landmark[0].z
                 for lm in hand_landmarks.landmark:
                     data_aux.extend([lm.x - base_x, lm.y - base_y, lm.z - base_z])
@@ -68,7 +74,7 @@ class ISLProcessor(VideoProcessorBase):
                 prediction = model.predict(data_input, verbose=0)
                 predicted_label = labels[np.argmax(prediction)]
                 
-                # Stability Logic
+                # Stability Logic: 15 frames for accuracy
                 if predicted_label == self.current_prediction:
                     self.stable_frames += 1
                 else:
@@ -77,7 +83,7 @@ class ISLProcessor(VideoProcessorBase):
                 
                 if self.stable_frames == 15:
                     if predicted_label != self.last_appended_sign:
-                        # Update session state safely
+                        # Direct state update from the receiver thread
                         st.session_state.translated_sentence += predicted_label
                         self.last_appended_sign = predicted_label
                 
@@ -93,16 +99,15 @@ col1, col2 = st.columns([2, 1])
 with col2:
     st.subheader("Controls & Output")
     
-    # Safely get translation history
-    current_history = st.session_state.get('translated_sentence', "")
-    
     if st.button("Clear Translation History"):
-        st.session_state.translated_sentence = ""
+        st.session_state['translated_sentence'] = ""
         st.rerun()
     
-    st.success(f"**Current Translation:** {current_history or 'Waiting for signs...'}")
+    # Using a placeholder to avoid reading state too early
+    output_area = st.empty()
+    output_area.success(f"**Current Translation:** {st.session_state.translated_sentence or 'Waiting for signs...'}")
     
-    # Reference image
+    # Reference guide for ISL
     image_name = "sign_alphabet_and_numbers.png"
     if os.path.exists(image_name):
         st.image(image_name, caption="ISL Reference Guide", use_container_width=True)
@@ -111,8 +116,7 @@ with col1:
     webrtc_streamer(
         key="isl-translator", 
         video_processor_factory=ISLProcessor,
-        rtc_configuration=RTCConfiguration(
-            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-        ),
-        media_stream_constraints={"video": True, "audio": False}
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True  # Helps prevent the polling_thread error
     )
